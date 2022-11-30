@@ -1,5 +1,5 @@
 {
-    "name": "jms/aop-bundle",
+    "name": "tezvi/aop-bundle",
     "description": "Adds AOP capabilities to Symfony2",
     "keywords": ["annotations","aop"],
     "type": "symfony-bundle",
@@ -13,7 +13,7 @@
     "require": {
         "php": ">=5.3.9",
         "symfony/framework-bundle": "^2.3 || ^3.0 || ^4.0",
-        "jms/cg": "^1.1"
+        "tezvi/cg": "^1.1"
     },
     "require-dev": {
         "symfony/phpunit-bridge": "^2.7 || ^4.0",
