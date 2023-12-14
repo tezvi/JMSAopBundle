@@ -20,17 +20,17 @@ namespace JMS\AopBundle\DependencyInjection\Compiler;
 
 use CG\Core\ClassUtils;
 use CG\Core\DefaultNamingStrategy;
+use CG\Core\ReflectionUtils;
 use CG\Generator\RelativePath;
-use JMS\AopBundle\Exception\RuntimeException;
-use Symfony\Component\Config\Resource\FileResource;
-use Symfony\Component\DependencyInjection\Reference;
 use CG\Proxy\Enhancer;
 use CG\Proxy\InterceptionGenerator;
-use Symfony\Component\DependencyInjection\Definition;
-use Symfony\Component\DependencyInjection\ContainerBuilder;
-use Symfony\Component\DependencyInjection\Compiler\CompilerPassInterface;
 use JMS\AopBundle\Aop\PointcutInterface;
-use CG\Core\ReflectionUtils;
+use JMS\AopBundle\Exception\RuntimeException;
+use Symfony\Component\Config\Resource\FileResource;
+use Symfony\Component\DependencyInjection\Compiler\CompilerPassInterface;
+use Symfony\Component\DependencyInjection\ContainerBuilder;
+use Symfony\Component\DependencyInjection\Definition;
+use Symfony\Component\DependencyInjection\Reference;
 
 /**
  * Matches pointcuts against service methods.
@@ -57,8 +57,8 @@ class PointcutMatchingPass implements CompilerPassInterface
     public function process(ContainerBuilder $container)
     {
         $this->container = $container;
-        $this->cacheDir = $container->getParameter('jms_aop.cache_dir').'/proxies';
-        $pointcuts = $this->getPointcuts();
+        $this->cacheDir  = $container->getParameter('jms_aop.cache_dir') . '/proxies';
+        $pointcuts       = $this->getPointcuts();
 
         $interceptors = array();
         foreach ($container->getDefinitions() as $id => $definition) {
@@ -71,28 +71,38 @@ class PointcutMatchingPass implements CompilerPassInterface
 
         $container
             ->getDefinition('jms_aop.interceptor_loader')
-            ->addArgument($interceptors)
-        ;
+            ->addArgument($interceptors);
     }
 
-    /**
-     * @param array<PointcutInterface> $pointcuts
-     * @param array<string,string> $interceptors
-     */
-    private function processInlineDefinitions($pointcuts, &$interceptors, array $a)
+    private function getPointcuts()
     {
-        foreach ($a as $k => $v) {
-            if ($v instanceof Definition) {
-                $this->processDefinition($v, $pointcuts, $interceptors);
-            } elseif (is_array($v)) {
-                $this->processInlineDefinitions($pointcuts, $interceptors, $v);
-            }
+        if (null !== $this->pointcuts) {
+            return $this->pointcuts;
         }
+
+        $pointcuts = $pointcutReferences = array();
+
+        foreach ($this->container->findTaggedServiceIds('jms_aop.pointcut') as $id => $attr) {
+            if (!isset($attr[0]['interceptor'])) {
+                throw new RuntimeException(
+                    'You need to set the "interceptor" attribute for the "jms_aop.pointcut" tag of service "' . $id . '".'
+                );
+            }
+
+            $pointcutReferences[$attr[0]['interceptor']] = new Reference($id);
+            $pointcuts[$attr[0]['interceptor']]          = $this->container->get($id);
+        }
+
+        $this->container
+            ->getDefinition('jms_aop.pointcut_container')
+            ->addArgument($pointcutReferences);
+
+        return $pointcuts;
     }
 
     /**
      * @param array<PointcutInterface> $pointcuts
-     * @param array<string,string> $interceptors
+     * @param array<string,string>     $interceptors
      */
     private function processDefinition(Definition $definition, $pointcuts, &$interceptors)
     {
@@ -105,7 +115,8 @@ class PointcutMatchingPass implements CompilerPassInterface
         if (method_exists($definition, 'getFactory') && $definition->getFactory()) {
             return;
         }
-        if (!method_exists($definition, 'getFactory') && ($definition->getFactoryService() || $definition->getFactoryClass())) {
+        if (!method_exists($definition, 'getFactory') && ($definition->getFactoryService(
+                ) || $definition->getFactoryClass())) {
             return;
         }
 
@@ -113,7 +124,12 @@ class PointcutMatchingPass implements CompilerPassInterface
             require_once $originalFilename;
         }
 
-        if (!class_exists($definition->getClass())) {
+        try {
+            if (!class_exists($definition->getClass())) {
+                return;
+            }
+        }
+        catch (\Throwable $exception) {
             return;
         }
 
@@ -134,6 +150,14 @@ class PointcutMatchingPass implements CompilerPassInterface
         $this->addResources($class, $this->container);
 
         if ($class->isFinal()) {
+            throw new \ReflectionException(
+                sprintf(
+                    'Class \'%s\' defines AOP pointcuts (\'%s\') but it\'s marked as final. Final classes cannot be ' .
+                    'proxied for AOP features. Either remove pointcuts or remove final modifier.',
+                    $class->getName(),
+                    implode("', '", array_keys($matchingPointcuts))
+                )
+            );
             return;
         }
 
@@ -164,12 +188,14 @@ class PointcutMatchingPass implements CompilerPassInterface
 
         $interceptors[ClassUtils::getUserClass($class->name)] = $classAdvices;
 
-        $proxyFilename = $this->cacheDir.'/'.str_replace('\\', '-', $class->name).'.php';
+        $proxyFilename = $this->cacheDir . '/' . str_replace('\\', '-', $class->name) . '.php';
 
         $generator = new InterceptionGenerator();
-        $generator->setFilter(function(\ReflectionMethod $method) use ($classAdvices) {
-            return isset($classAdvices[$method->name]);
-        });
+        $generator->setFilter(
+            function (\ReflectionMethod $method) use ($classAdvices) {
+                return isset($classAdvices[$method->name]);
+            }
+        );
 
         if ($originalFilename) {
             $relativeOriginalFilename = $this->relativizePath($proxyFilename, $originalFilename);
@@ -179,35 +205,25 @@ class PointcutMatchingPass implements CompilerPassInterface
                 $generator->setRequiredFile($relativeOriginalFilename);
             }
         }
-        $enhancer = new Enhancer($class, array(), array(
-            $generator
-        ));
-        $enhancer->setNamingStrategy(new DefaultNamingStrategy('EnhancedProxy'.substr(md5($this->container->getParameter('jms_aop.cache_dir')), 0, 8)));
+        $enhancer = new Enhancer(
+            $class, array(), array(
+                      $generator
+                  )
+        );
+        $enhancer->setNamingStrategy(
+            new DefaultNamingStrategy(
+                'EnhancedProxy' . substr(md5($this->container->getParameter('jms_aop.cache_dir')), 0, 8)
+            )
+        );
         $enhancer->writeClass($proxyFilename);
         $definition->setFile($proxyFilename);
         $definition->setClass($enhancer->getClassName($class));
-        $definition->addMethodCall('__CGInterception__setLoader', array(
-            new Reference('jms_aop.interceptor_loader')
-        ));
-    }
-
-    private function relativizePath($targetPath, $path)
-    {
-        $commonPath = dirname($targetPath);
-
-        $level = 0;
-        while ( ! empty($commonPath)) {
-            if (0 === strpos($path, $commonPath)) {
-                $relativePath = str_repeat('../', $level).substr($path, strlen($commonPath) + 1);
-
-                return $relativePath;
-            }
-
-            $commonPath = dirname($commonPath);
-            $level += 1;
-        }
-
-        return $path;
+        $definition->addMethodCall(
+            '__CGInterception__setLoader',
+            array(
+                new Reference('jms_aop.interceptor_loader')
+            )
+        );
     }
 
     private function addResources(\ReflectionClass $class)
@@ -217,28 +233,37 @@ class PointcutMatchingPass implements CompilerPassInterface
         } while (($class = $class->getParentClass()) && $class->getFilename());
     }
 
-    private function getPointcuts()
+    private function relativizePath($targetPath, $path)
     {
-        if (null !== $this->pointcuts) {
-            return $this->pointcuts;
-        }
+        $commonPath = dirname($targetPath);
 
-        $pointcuts = $pointcutReferences = array();
+        $level = 0;
+        while (!empty($commonPath)) {
+            if (0 === strpos($path, $commonPath)) {
+                $relativePath = str_repeat('../', $level) . substr($path, strlen($commonPath) + 1);
 
-        foreach ($this->container->findTaggedServiceIds('jms_aop.pointcut') as $id => $attr) {
-            if (!isset($attr[0]['interceptor'])) {
-                throw new RuntimeException('You need to set the "interceptor" attribute for the "jms_aop.pointcut" tag of service "'.$id.'".');
+                return $relativePath;
             }
 
-            $pointcutReferences[$attr[0]['interceptor']] = new Reference($id);
-            $pointcuts[$attr[0]['interceptor']] = $this->container->get($id);
+            $commonPath = dirname($commonPath);
+            $level      += 1;
         }
 
-        $this->container
-            ->getDefinition('jms_aop.pointcut_container')
-            ->addArgument($pointcutReferences)
-        ;
+        return $path;
+    }
 
-        return $pointcuts;
+    /**
+     * @param array<PointcutInterface> $pointcuts
+     * @param array<string,string>     $interceptors
+     */
+    private function processInlineDefinitions($pointcuts, &$interceptors, array $a)
+    {
+        foreach ($a as $k => $v) {
+            if ($v instanceof Definition) {
+                $this->processDefinition($v, $pointcuts, $interceptors);
+            } elseif (is_array($v)) {
+                $this->processInlineDefinitions($pointcuts, $interceptors, $v);
+            }
+        }
     }
 }

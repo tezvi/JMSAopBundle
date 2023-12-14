@@ -29,6 +29,6 @@ class JMSAopBundle extends Bundle
 
     public function build(ContainerBuilder $container)
     {
-        $container->addCompilerPass(new PointcutMatchingPass(), PassConfig::TYPE_AFTER_REMOVING);
+        $container->addCompilerPass(new PointcutMatchingPass(), PassConfig::TYPE_BEFORE_REMOVING);
     }
 }
